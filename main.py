@@ -48,7 +48,16 @@ class GroupMemberViewerPlugin(BasePlugin):
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
         sec = cfg.get("section_main", {})
-        self.cache_ttl = int(sec.get("cache_ttl", 600) or 0)
+        cache_ttl = int(sec.get("cache_ttl", 10) or 0)
+        if cache_ttl == 600:
+            # 旧版默认值 600 秒（10 分钟），自动迁移为新默认 10 秒；
+            # 用户主动改成其他值的不受影响
+            logger.warning(
+                "[GroupMemberViewer] 检测到旧版默认缓存时间 600 秒，"
+                "已自动按新默认值 10 秒生效；如需更长缓存请在配置中修改 cache_ttl"
+            )
+            cache_ttl = 10
+        self.cache_ttl = cache_ttl
         self.max_results = max(1, int(sec.get("max_results", 20) or 20))
         self.inject_prompt_enabled = sec.get("inject_prompt", True)
         # 是否在查询结果中展示并匹配专属头衔
@@ -171,11 +180,11 @@ class GroupMemberViewerPlugin(BasePlugin):
 
     @register.tool(
         name="group_find_member",
-        description="【仅QQ群】按关键词查找群成员，同时匹配 QQ号、QQ昵称、群名片。要找某个群友、确认其QQ号或身份时调用。",
+        description="【仅QQ群】按关键词查找群成员，同时匹配 QQ号、QQ昵称、群名片、专属头衔，任一字段命中都会列出。要找某个群友、确认其QQ号或身份时调用。",
         params={
             "type": "object",
             "properties": {
-                "keyword": {"type": "string", "description": "搜索关键词：QQ号的一部分、QQ昵称或群名片的一部分"},
+                "keyword": {"type": "string", "description": "搜索关键词：QQ号、QQ昵称、群名片或专属头衔（含其中一部分即可匹配）"},
             },
             "required": ["keyword"],
         },
