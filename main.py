@@ -5,7 +5,7 @@
 功能：
 - group_member_overview: 群概览（总人数、群主、管理员列表）
 - group_find_member: 按关键词查找成员（同时匹配 QQ号 / QQ昵称 / 群名片）
-- group_member_detail: 指定成员详情（入群时间、最后发言、等级、头衔等）
+- group_member_detail: 指定成员详情（入群时间、最后发言、等级、头衔等），支持 QQ号或关键词定位（唯一命中才查详情）
 
 与 group_manager（群管理插件）的关系：
 - 两个插件可同时安装，互不冲突。本插件加载时，若检测到 group_manager，
@@ -32,7 +32,7 @@ USAGE_PROMPT = """\
 
 - group_member_overview: 查看群总人数、群主和管理员列表
 - group_find_member: 按关键词查找群成员，会同时匹配 QQ号、QQ昵称、群名片
-- group_member_detail: 查看指定成员的详情（入群时间、最后发言等）
+- group_member_detail: 查看指定成员的详情（入群时间、最后发言等）。可传 QQ号，也可传关键词——四类字段任一命中且唯一时直接返回详情，命中多个时会列出候选
 
 ### 重要概念
 - 「群名片」是成员在本群专用的名字，「QQ昵称」是其全局昵称，两者经常不同
@@ -230,19 +230,52 @@ class GroupMemberViewerPlugin(BasePlugin):
 
     @register.tool(
         name="group_member_detail",
-        description="【仅QQ群】查看指定群成员的详细信息：名片、昵称、身份、等级、头衔、入群时间、最后发言时间、是否被禁言。",
+        description="【仅QQ群】查看指定群成员的详细信息：名片、昵称、身份、等级、头衔、入群时间、最后发言时间、是否被禁言。可直接传 QQ号，也可传 keyword 关键词（同时匹配 QQ号/QQ昵称/群名片/专属头衔）：唯一命中时直接返回详情，多个命中时列出候选。",
         params={
             "type": "object",
             "properties": {
                 "user_id": {"type": "string", "description": "要查询的QQ号（可先用 group_find_member 查找）"},
+                "keyword": {"type": "string", "description": "可选。搜索关键词：QQ号、QQ昵称、群名片或专属头衔（含其中一部分即可匹配）；唯一命中时直接查详情，多个命中时返回候选列表"},
             },
-            "required": ["user_id"],
         },
     )
-    async def member_detail(self, event: KiraMessageBatchEvent, user_id: str) -> str:
+    async def member_detail(self, event: KiraMessageBatchEvent, user_id: str = "", keyword: str = "") -> str:
         if not event.is_group_message():
             return "❌ 请在群聊中使用该工具"
         group_id = event.session.session_id
+
+        keyword = (keyword or "").strip()
+        user_id = (user_id or "").strip()
+        if keyword and not user_id:
+            # 关键词定位：四类字段 OR 匹配，唯一命中才查详情
+            members, err = await self._fetch_members(event, group_id)
+            if err:
+                return err
+            kw = keyword.lower()
+            matched = [
+                m for m in members
+                if kw in str(m.get("user_id", ""))
+                or kw in (m.get("nickname") or "").lower()
+                or kw in (m.get("card") or "").lower()
+                or kw in ((m.get("title") or "").lower() if self.show_title else "")
+            ]
+            if not matched:
+                return (
+                    f"🔍 没有找到匹配「{keyword}」的成员（已同时检索 QQ号/QQ昵称/群名片/专属头衔）。\n"
+                    "提示：可以换关键词的一部分再试。"
+                )
+            if len(matched) > 1:
+                lines = [f"🔍「{keyword}」匹配到 {len(matched)} 位成员，请用 QQ号 指定要查询的对象（格式：群名片 | QQ昵称 | QQ号 | 身份）："]
+                for m in matched[: self.max_results]:
+                    role = ROLE_MAP.get(m.get("role", "member"), "成员")
+                    lines.append(f"- {self._display(m, self.show_title)} | {role}")
+                if len(matched) > self.max_results:
+                    lines.append(f"... 仅显示前 {self.max_results} 条，请缩小关键词范围")
+                return "\n".join(lines)
+            user_id = str(matched[0].get("user_id", ""))
+        if not user_id:
+            return "❌ 请提供要查询的 QQ号（user_id）或搜索关键词（keyword）"
+
         client = self._get_qq_client(event)
         if not client:
             return self._not_qq_reply()
